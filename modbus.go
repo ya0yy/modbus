@@ -76,6 +76,7 @@ func (e *ModbusError) Error() string {
 
 // ProtocolDataUnit (PDU) is independent of underlying communication layers.
 type ProtocolDataUnit struct {
+	SlaveId      byte
 	FunctionCode byte
 	Data         []byte
 }
