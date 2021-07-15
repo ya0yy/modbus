@@ -29,7 +29,7 @@ func main() {
 	handler.Connect()
 
 	defer handler.Close()
-	relayClient := modbus.NewNewClient(handler, 0x04)
+	relayClient := handler.NewClient(0x04)
 
 	rh := &modbus.Receiver{
 		ExLen: 8,

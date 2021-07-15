@@ -33,6 +33,11 @@ var ReadChan = make(chan []byte, 1)
 
 var l = &sync.Mutex{}
 
+// NewClient creates a new modbus client with given backend handler.
+func (mb *RTUPassivityClientHandler) NewClient(slaveId byte) Client {
+	return &passivityClient{packager: mb, transporter: mb, SlaveId: slaveId}
+}
+
 func (mb *RTUPassivityClientHandler) Connect() {
 	err := mb.rtuPassivitySerialTransporter.Connect()
 	if err != nil {

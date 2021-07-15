@@ -15,14 +15,6 @@ type passivityClient struct {
 	transporter Transporter
 }
 
-// NewClient creates a new modbus client with given backend handler.
-func NewNewClient(handler ClientHandler, slaveId byte) Client {
-	if _, ok := handler.(*RTUPassivityClientHandler); ok {
-		return &passivityClient{packager: handler, transporter: handler, SlaveId: slaveId}
-	}
-	panic("仅仅支持RTUPassivityClientHandler类型")
-}
-
 // Request:
 //  Function code         : 1 byte (0x01)
 //  Starting address      : 2 bytes
