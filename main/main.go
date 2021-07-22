@@ -18,7 +18,7 @@ var jidianqi = make(chan uint16, 10)
 
 func main() {
 	// Modbus RTU/ASCII
-	handler := modbus.NewRTUPassivityClientHandler("/dev/tty.usbserial-14320")
+	handler := modbus.NewRTUPassivityClientHandler("/dev/tty.usbserial-14320", context.TODO())
 	handler.BaudRate = 9600
 	handler.DataBits = 8
 	handler.StopBits = 1
@@ -33,7 +33,7 @@ func main() {
 
 	rh := &modbus.Receiver{
 		ExLen: 8,
-		Callback: func(resp []byte) {
+		Handle: func(slaveId byte, funCode byte, resp []byte, _ context.Context) {
 			ret := (uint16(resp[4]) << 8) + uint16(resp[5])
 			//jidianqi <- struct{}{}
 			fmt.Printf("人体感应器: %v\n", ret)
@@ -43,7 +43,7 @@ func main() {
 
 	rh1 := &modbus.Receiver{
 		ExLen: 10,
-		Callback: func(resp []byte) {
+		Handle: func(slaveId byte, funCode byte, resp []byte, _ context.Context) {
 			registerCode := binary.BigEndian.Uint16(resp[2:])
 			if registerCode != 0x03 {
 				fmt.Printf("忽略无用帧: %v \n", resp)
@@ -60,8 +60,8 @@ func main() {
 		},
 	}
 
-	modbus.RegisterReceiver(0x02, 6, rh)
-	modbus.RegisterReceiver(0x03, 6, rh1)
+	handler.RegisterReceiver(0x02, 6, rh)
+	handler.RegisterReceiver(0x03, 6, rh1)
 	go switchInit()
 
 	for cmd := range jidianqi {

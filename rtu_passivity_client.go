@@ -5,6 +5,7 @@
 package modbus
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"log"
@@ -14,15 +15,21 @@ import (
 
 // RTUPassivityClientHandler implements Packager and Transporter interface.
 type RTUPassivityClientHandler struct {
+	ctx        context.Context
+	requestSet *sync.Map            //= new(sync.Map) // make(map[uint16]*NewRequest, 16)
+	receivers  map[uint16]*Receiver //= make(map[uint16]*Receiver, 16)
 	rtuPassivityPackager
 	rtuPassivitySerialTransporter
 }
 
-func NewRTUPassivityClientHandler(address string) *RTUPassivityClientHandler {
+func NewRTUPassivityClientHandler(address string, ctx context.Context) *RTUPassivityClientHandler {
 	handler := &RTUPassivityClientHandler{}
 	handler.Address = address
 	handler.Timeout = serialTimeout
 	handler.IdleTimeout = serialIdleTimeout
+	handler.receivers = make(map[uint16]*Receiver)
+	handler.requestSet = &sync.Map{}
+	handler.ctx = ctx
 	return handler
 }
 
@@ -70,7 +77,13 @@ func (mb *RTUPassivityClientHandler) Listen() {
 		case data := <-ReadChan:
 			dataQueue = append(dataQueue, data...)
 			sig.Signal()
-
+		case <-mb.ctx.Done():
+			if err := mb.Close(); err != nil {
+				mb.logf("ERROR: %v when rtu listener is closing", err)
+			}
+			sig.Broadcast()
+			mb.logf("rtu listener was closed")
+			return
 		}
 	}
 }
@@ -83,15 +96,23 @@ func (mb *RTUPassivityClientHandler) startHandleLoop() {
 			sig.L.Lock()
 			sig.Wait()
 			sig.L.Unlock()
+			select {
+			case _, ok := <-mb.ctx.Done():
+				if ok {
+					mb.logf("rtu handle looper was closed")
+					return
+				}
+			default:
+			}
 			mb.logf("醒来")
 		}
 		mb.logf("本次queue: %v", dataQueue)
 
 		// 遍历请求队列
 		var hitGuide uint16
-		requestSet.Range(func(key, value interface{}) bool {
+		mb.requestSet.Range(func(key, value interface{}) bool {
 			guide, newRequest := key.(uint16), value.(*NewRequest)
-			mb.logf("本次主动事件: %v", requestSet)
+			mb.logf("本次主动事件: %v", mb.requestSet)
 			if binary.BigEndian.Uint16(dataQueue) == guide {
 				mb.logf("命中主动请求事件: guide: %v", guide)
 				expectedLength := newRequest.ExpectedLength()
@@ -105,11 +126,12 @@ func (mb *RTUPassivityClientHandler) startHandleLoop() {
 
 		// 如果不是主动请求，则匹配提前注册好的侦听回调函数
 		if hitGuide == 0 {
-			for guide, receiver := range receivers {
+			for guide, receiver := range mb.receivers {
 				if len(dataQueue) >= 4 && binary.BigEndian.Uint16(dataQueue) == guide {
 					mb.logf("命中注册事件: guide: %v", guide)
 					expectedLength := receiver.ExLen
-					go receiver.Callback(dataQueue[:expectedLength])
+					resp := dataQueue[:expectedLength]
+					go receiver.Handle(resp[0], resp[1], resp, mb.ctx)
 					dataQueue = dataQueue[expectedLength:]
 					hitGuide = 0xffff
 					break
@@ -118,7 +140,7 @@ func (mb *RTUPassivityClientHandler) startHandleLoop() {
 		}
 
 		if hitGuide != 0 {
-			requestSet.Delete(hitGuide)
+			mb.requestSet.Delete(hitGuide)
 		} else {
 			// 如果没有匹配的Receiver或者请求，则去除头帧，继续遍历
 			dataQueue = dataQueue[1:]
@@ -217,7 +239,7 @@ type rtuPassivitySerialTransporter struct {
 	serialPort
 }
 
-func (mb *rtuPassivitySerialTransporter) Send(aduRequest []byte) (aduResponse []byte, err error) {
+func (mb *RTUPassivityClientHandler) Send(aduRequest []byte) (aduResponse []byte, err error) {
 	// Make sure port is connected
 	if err = mb.serialPort.connect(); err != nil {
 		return
@@ -231,7 +253,7 @@ func (mb *rtuPassivitySerialTransporter) Send(aduRequest []byte) (aduResponse []
 
 	select {
 	case <-time.NewTicker(time.Second * 5).C:
-		RemoveRequest(guide)
+		mb.RemoveRequest(guide)
 		err = fmt.Errorf("响应超时, slaveId: %v, funCode: %v", aduRequest[0], aduRequest[1])
 	case aduResponse = <-r:
 		mb.serialPort.logf("modbus: received % x\n", aduResponse)
@@ -239,9 +261,9 @@ func (mb *rtuPassivitySerialTransporter) Send(aduRequest []byte) (aduResponse []
 	return
 }
 
-func (mb *rtuPassivitySerialTransporter) w(newRequest *NewRequest) chan []byte {
+func (mb *RTUPassivityClientHandler) w(newRequest *NewRequest) chan []byte {
 	WriteChan <- newRequest
-	return RegisterRequest(newRequest)
+	return mb.RegisterRequest(newRequest)
 }
 
 type NewRequest struct {
@@ -260,24 +282,21 @@ func (nr *NewRequest) Recv(resp []byte) {
 }
 
 type Receiver struct {
-	ExLen    byte
-	Callback func([]byte)
+	ExLen  byte
+	Handle func(byte, byte, []byte, context.Context) // slaveId, funcCode, resp[]
 }
 
-var requestSet = new(sync.Map) // make(map[uint16]*NewRequest, 16)
-var receivers = make(map[uint16]*Receiver, 16)
-
-func RegisterReceiver(slaveId byte, funCode byte, rh *Receiver) {
-	receivers[(uint16(slaveId)<<8)+uint16(funCode)] = rh
+func (mb *RTUPassivityClientHandler) RegisterReceiver(slaveId byte, funCode byte, rh *Receiver) {
+	mb.receivers[(uint16(slaveId)<<8)+uint16(funCode)] = rh
 }
 
-func RegisterRequest(newRequest *NewRequest) chan []byte {
+func (mb *RTUPassivityClientHandler) RegisterRequest(newRequest *NewRequest) chan []byte {
 	resp := make(chan []byte, 1)
 	newRequest.resp = resp
-	requestSet.Store(newRequest.Guide, newRequest)
+	mb.requestSet.Store(newRequest.Guide, newRequest)
 	return resp
 }
 
-func RemoveRequest(guide uint16) {
-	requestSet.Delete(guide)
+func (mb *RTUPassivityClientHandler) RemoveRequest(guide uint16) {
+	mb.requestSet.Delete(guide)
 }
