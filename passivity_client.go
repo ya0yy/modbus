@@ -7,12 +7,20 @@ package modbus
 import (
 	"encoding/binary"
 	"fmt"
+	"time"
 )
 
-type passivityClient struct {
+type PassivityClient struct {
 	SlaveId     byte
 	packager    Packager
 	transporter Transporter
+}
+
+func (mb *PassivityClient) DirectWrite(b []byte) {
+	handler := mb.transporter.(*RTUPassivityClientHandler)
+	time.Sleep(time.Millisecond * 100)
+	handler.logf("直接发送帧: % x", b)
+	handler.Dw(b)
 }
 
 // Request:
@@ -23,7 +31,7 @@ type passivityClient struct {
 //  Function code         : 1 byte (0x01)
 //  Byte count            : 1 byte
 //  Coil status           : N* bytes (=N or N+1)
-func (mb *passivityClient) ReadCoils(address, quantity uint16) (results []byte, err error) {
+func (mb *PassivityClient) ReadCoils(address, quantity uint16) (results []byte, err error) {
 	if quantity < 1 || quantity > 2000 {
 		err = fmt.Errorf("modbus: quantity '%v' must be between '%v' and '%v',", quantity, 1, 2000)
 		return
@@ -54,7 +62,7 @@ func (mb *passivityClient) ReadCoils(address, quantity uint16) (results []byte, 
 //  Function code         : 1 byte (0x02)
 //  Byte count            : 1 byte
 //  Input status          : N* bytes (=N or N+1)
-func (mb *passivityClient) ReadDiscreteInputs(address, quantity uint16) (results []byte, err error) {
+func (mb *PassivityClient) ReadDiscreteInputs(address, quantity uint16) (results []byte, err error) {
 	if quantity < 1 || quantity > 2000 {
 		err = fmt.Errorf("modbus: quantity '%v' must be between '%v' and '%v',", quantity, 1, 2000)
 		return
@@ -86,12 +94,13 @@ func (mb *passivityClient) ReadDiscreteInputs(address, quantity uint16) (results
 //  Function code         : 1 byte (0x03)
 //  Byte count            : 1 byte
 //  Register value        : Nx2 bytes
-func (mb *passivityClient) ReadHoldingRegisters(address, quantity uint16) (results []byte, err error) {
+func (mb *PassivityClient) ReadHoldingRegisters(address, quantity uint16) (results []byte, err error) {
 	if quantity < 1 || quantity > 125 {
 		err = fmt.Errorf("modbus: quantity '%v' must be between '%v' and '%v',", quantity, 1, 125)
 		return
 	}
 	request := ProtocolDataUnit{
+		SlaveId:      mb.SlaveId,
 		FunctionCode: FuncCodeReadHoldingRegisters,
 		Data:         dataBlock(address, quantity),
 	}
@@ -117,7 +126,7 @@ func (mb *passivityClient) ReadHoldingRegisters(address, quantity uint16) (resul
 //  Function code         : 1 byte (0x04)
 //  Byte count            : 1 byte
 //  Input registers       : N bytes
-func (mb *passivityClient) ReadInputRegisters(address, quantity uint16) (results []byte, err error) {
+func (mb *PassivityClient) ReadInputRegisters(address, quantity uint16) (results []byte, err error) {
 	if quantity < 1 || quantity > 125 {
 		err = fmt.Errorf("modbus: quantity '%v' must be between '%v' and '%v',", quantity, 1, 125)
 		return
@@ -148,7 +157,7 @@ func (mb *passivityClient) ReadInputRegisters(address, quantity uint16) (results
 //  Function code         : 1 byte (0x05)
 //  Output address        : 2 bytes
 //  Output value          : 2 bytes
-func (mb *passivityClient) WriteSingleCoil(address, value uint16) (results []byte, err error) {
+func (mb *PassivityClient) WriteSingleCoil(address, value uint16) (results []byte, err error) {
 	// The requested ON/OFF state can only be 0xFF00 and 0x0000
 	//if value != 0xFF00 && value != 0x0000 {
 	//	err = fmt.Errorf("modbus: state '%v' must be either 0xFF00 (ON) or 0x0000 (OFF)", value)
@@ -190,7 +199,7 @@ func (mb *passivityClient) WriteSingleCoil(address, value uint16) (results []byt
 //  Function code         : 1 byte (0x06)
 //  Register address      : 2 bytes
 //  Register value        : 2 bytes
-func (mb *passivityClient) WriteSingleRegister(address, value uint16) (results []byte, err error) {
+func (mb *PassivityClient) WriteSingleRegister(address, value uint16) (results []byte, err error) {
 	request := ProtocolDataUnit{
 		SlaveId:      mb.SlaveId,
 		FunctionCode: FuncCodeWriteSingleRegister,
@@ -232,7 +241,7 @@ func (mb *passivityClient) WriteSingleRegister(address, value uint16) (results [
 //  Function code         : 1 byte (0x0F)
 //  Starting address      : 2 bytes
 //  Quantity of outputs   : 2 bytes
-func (mb *passivityClient) WriteMultipleCoils(address, quantity uint16, value []byte) (results []byte, err error) {
+func (mb *PassivityClient) WriteMultipleCoils(address, quantity uint16, value []byte) (results []byte, err error) {
 	if quantity < 1 || quantity > 1968 {
 		err = fmt.Errorf("modbus: quantity '%v' must be between '%v' and '%v',", quantity, 1, 1968)
 		return
@@ -274,7 +283,7 @@ func (mb *passivityClient) WriteMultipleCoils(address, quantity uint16, value []
 //  Function code         : 1 byte (0x10)
 //  Starting address      : 2 bytes
 //  Quantity of registers : 2 bytes
-func (mb *passivityClient) WriteMultipleRegisters(address, quantity uint16, value []byte) (results []byte, err error) {
+func (mb *PassivityClient) WriteMultipleRegisters(address, quantity uint16, value []byte) (results []byte, err error) {
 	if quantity < 1 || quantity > 123 {
 		err = fmt.Errorf("modbus: quantity '%v' must be between '%v' and '%v',", quantity, 1, 123)
 		return
@@ -316,7 +325,7 @@ func (mb *passivityClient) WriteMultipleRegisters(address, quantity uint16, valu
 //  Reference address     : 2 bytes
 //  AND-mask              : 2 bytes
 //  OR-mask               : 2 bytes
-func (mb *passivityClient) MaskWriteRegister(address, andMask, orMask uint16) (results []byte, err error) {
+func (mb *PassivityClient) MaskWriteRegister(address, andMask, orMask uint16) (results []byte, err error) {
 	request := ProtocolDataUnit{
 		FunctionCode: FuncCodeMaskWriteRegister,
 		Data:         dataBlock(address, andMask, orMask),
@@ -361,7 +370,7 @@ func (mb *passivityClient) MaskWriteRegister(address, andMask, orMask uint16) (r
 //  Function code         : 1 byte (0x17)
 //  Byte count            : 1 byte
 //  Read registers value  : Nx2 bytes
-func (mb *passivityClient) ReadWriteMultipleRegisters(readAddress, readQuantity, writeAddress, writeQuantity uint16, value []byte) (results []byte, err error) {
+func (mb *PassivityClient) ReadWriteMultipleRegisters(readAddress, readQuantity, writeAddress, writeQuantity uint16, value []byte) (results []byte, err error) {
 	if readQuantity < 1 || readQuantity > 125 {
 		err = fmt.Errorf("modbus: quantity to read '%v' must be between '%v' and '%v',", readQuantity, 1, 125)
 		return
@@ -396,7 +405,7 @@ func (mb *passivityClient) ReadWriteMultipleRegisters(readAddress, readQuantity,
 //  FIFO count            : 2 bytes
 //  FIFO count            : 2 bytes (<=31)
 //  FIFO value register   : Nx2 bytes
-func (mb *passivityClient) ReadFIFOQueue(address uint16) (results []byte, err error) {
+func (mb *PassivityClient) ReadFIFOQueue(address uint16) (results []byte, err error) {
 	request := ProtocolDataUnit{
 		FunctionCode: FuncCodeReadFIFOQueue,
 		Data:         dataBlock(address),
@@ -426,7 +435,7 @@ func (mb *passivityClient) ReadFIFOQueue(address uint16) (results []byte, err er
 // Helpers
 
 // send sends request and checks possible exception in the response.
-func (mb *passivityClient) send(request *ProtocolDataUnit) (response *ProtocolDataUnit, err error) {
+func (mb *PassivityClient) send(request *ProtocolDataUnit) (response *ProtocolDataUnit, err error) {
 	aduRequest, err := mb.packager.Encode(request)
 	if err != nil {
 		return

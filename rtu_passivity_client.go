@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -36,13 +37,12 @@ func NewRTUPassivityClientHandler(address string, ctx context.Context) *RTUPassi
 var dataQueue = make([]byte, 0, 128)
 var sig = sync.NewCond(&sync.Mutex{})
 var WriteChan = make(chan *NewRequest, 16)
+var DirectWrite = make(chan []byte, 8)
 var ReadChan = make(chan []byte, 1)
 
-var l = &sync.Mutex{}
-
 // NewClient creates a new modbus client with given backend handler.
-func (mb *RTUPassivityClientHandler) NewClient(slaveId byte) Client {
-	return &passivityClient{packager: mb, transporter: mb, SlaveId: slaveId}
+func (mb *RTUPassivityClientHandler) NewClient(slaveId byte) *PassivityClient {
+	return &PassivityClient{packager: mb, transporter: mb, SlaveId: slaveId}
 }
 
 func (mb *RTUPassivityClientHandler) Connect() {
@@ -53,7 +53,6 @@ func (mb *RTUPassivityClientHandler) Connect() {
 	go mb.Listen()
 }
 
-// 循环读取
 func (mb *RTUPassivityClientHandler) Listen() {
 	go mb.startHandleLoop()
 	go mb.startReadLoop()
@@ -61,21 +60,28 @@ func (mb *RTUPassivityClientHandler) Listen() {
 	for {
 		select {
 		case newRequest := <-WriteChan:
-			l.Lock()
+			sig.L.Lock()
 			// write
 			_ = mb.Close()
 			if err := mb.connect(); err != nil {
 				mb.logf("连接出错: %v", err)
 			}
 			// rs485电气特性，这里睡眠5ms
-			time.Sleep(time.Millisecond * 5)
+			time.Sleep(time.Millisecond * 100)
 			mb.logf("modbus: sending % x\n", newRequest.Adu)
 			if _, err := mb.port.Write(newRequest.Adu); err != nil {
 				mb.logf("请求错误, %v, SlaveId: %v, funCode: %v", err, newRequest.Guide>>8, newRequest.Guide|0x00ff)
 			}
-			l.Unlock()
+			sig.L.Unlock()
+		case dw := <-DirectWrite:
+			// 直接写入并没有做同步处理
+			if _, err := mb.port.Write(dw); err != nil {
+				mb.logf("写入错误, %v", err)
+			}
 		case data := <-ReadChan:
+			sig.L.Lock()
 			dataQueue = append(dataQueue, data...)
+			sig.L.Unlock()
 			sig.Signal()
 		case <-mb.ctx.Done():
 			if err := mb.Close(); err != nil {
@@ -91,11 +97,10 @@ func (mb *RTUPassivityClientHandler) Listen() {
 // 循环处理
 func (mb *RTUPassivityClientHandler) startHandleLoop() {
 	for {
+		sig.L.Lock()
 		for len(dataQueue) < 4 {
 			mb.logf("小于4，进入睡眠，长度: %v", len(dataQueue))
-			sig.L.Lock()
 			sig.Wait()
-			sig.L.Unlock()
 			select {
 			case _, ok := <-mb.ctx.Done():
 				if ok {
@@ -106,13 +111,12 @@ func (mb *RTUPassivityClientHandler) startHandleLoop() {
 			}
 			mb.logf("醒来")
 		}
-		mb.logf("本次queue: %v", dataQueue)
+		mb.logf("本次queue: % x", dataQueue)
 
 		// 遍历请求队列
 		var hitGuide uint16
 		mb.requestSet.Range(func(key, value interface{}) bool {
 			guide, newRequest := key.(uint16), value.(*NewRequest)
-			mb.logf("本次主动事件: %v", mb.requestSet)
 			if binary.BigEndian.Uint16(dataQueue) == guide {
 				mb.logf("命中主动请求事件: guide: %v", guide)
 				expectedLength := newRequest.ExpectedLength()
@@ -121,6 +125,7 @@ func (mb *RTUPassivityClientHandler) startHandleLoop() {
 				hitGuide = guide
 				return false
 			}
+			mb.logf("主动事件: %v 未命中", key)
 			return true
 		})
 
@@ -130,6 +135,11 @@ func (mb *RTUPassivityClientHandler) startHandleLoop() {
 				if len(dataQueue) >= 4 && binary.BigEndian.Uint16(dataQueue) == guide {
 					mb.logf("命中注册事件: guide: %v", guide)
 					expectedLength := receiver.ExLen
+					if l := len(dataQueue); l < int(expectedLength) {
+						mb.logf("匹配guide, 但是帧长度过短")
+						dataQueue = dataQueue[l:]
+						continue
+					}
 					resp := dataQueue[:expectedLength]
 					go receiver.Handle(resp[0], resp[1], resp, mb.ctx)
 					dataQueue = dataQueue[expectedLength:]
@@ -141,21 +151,22 @@ func (mb *RTUPassivityClientHandler) startHandleLoop() {
 
 		if hitGuide != 0 {
 			mb.requestSet.Delete(hitGuide)
-		} else {
+		} else if len(dataQueue) > 0 {
 			// 如果没有匹配的Receiver或者请求，则去除头帧，继续遍历
 			dataQueue = dataQueue[1:]
 		}
+		sig.L.Unlock()
 	}
 }
 
 // 循环读取
 func (mb *RTUPassivityClientHandler) startReadLoop() {
 	for {
-		l.Lock()
+		sig.L.Lock()
 		if err := mb.connect(); err != nil {
 			log.Fatalf("连接错误: %v", err)
 		}
-		l.Unlock()
+		sig.L.Unlock()
 
 		buf := make([]byte, 256)
 
@@ -163,6 +174,9 @@ func (mb *RTUPassivityClientHandler) startReadLoop() {
 		if err != nil {
 			mb.logf("读取错误: %v", err)
 			time.Sleep(time.Millisecond * 500)
+			if err == syscall.EBADF {
+				n = 0
+			}
 		}
 		ReadChan <- buf[:n]
 	}
@@ -223,8 +237,8 @@ func (mb *rtuPassivityPackager) Decode(adu []byte) (pdu *ProtocolDataUnit, err e
 	crc.reset().pushBytes(adu[0 : length-2])
 	checksum := uint16(adu[length-1])<<8 | uint16(adu[length-2])
 	if checksum != crc.value() {
-		//err = fmt.Errorf("modbus: response crc '%v' does not match expected '%v'", checksum, crc.value())
-		fmt.Printf("modbus: response crc '%v' does not match expected '%v'\n 丢弃", checksum, crc.value())
+		err = fmt.Errorf("modbus: response crc '%v' does not match expected '%v'", checksum, crc.value())
+		//fmt.Printf("modbus: response crc '%v' does not match expected '%v'\n 丢弃", checksum, crc.value())
 		return
 	}
 	// Function code & data
@@ -237,6 +251,10 @@ func (mb *rtuPassivityPackager) Decode(adu []byte) (pdu *ProtocolDataUnit, err e
 // rtuSerialTransporter implements Transporter interface.
 type rtuPassivitySerialTransporter struct {
 	serialPort
+}
+
+func (mb *RTUPassivityClientHandler) Dw(b []byte) {
+	DirectWrite <- b
 }
 
 func (mb *RTUPassivityClientHandler) Send(aduRequest []byte) (aduResponse []byte, err error) {
