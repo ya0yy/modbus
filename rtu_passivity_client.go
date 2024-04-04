@@ -115,7 +115,7 @@ func (mb *RTUPassivityClientHandler) startHandleLoop() {
 
 		// 遍历请求队列
 		var hitGuide uint16
-		mb.requestSet.Range(func(key, value interface{}) bool {
+		mb.requestSet.Range(func(key, value any) bool {
 			guide, newRequest := key.(uint16), value.(*NewRequest)
 			if binary.BigEndian.Uint16(dataQueue) == guide {
 				mb.logf("命中主动请求事件: guide: %v", guide)
@@ -187,10 +187,11 @@ type rtuPassivityPackager struct {
 }
 
 // Encode encodes PDU in a RTU frame:
-//  Slave Address   : 1 byte
-//  Function        : 1 byte
-//  Data            : 0 up to 252 bytes
-//  CRC             : 2 byte
+//
+//	Slave Address   : 1 byte
+//	Function        : 1 byte
+//	Data            : 0 up to 252 bytes
+//	CRC             : 2 byte
 func (mb *rtuPassivityPackager) Encode(pdu *ProtocolDataUnit) (adu []byte, err error) {
 	length := len(pdu.Data) + 4
 	if length > rtuMaxSize {
